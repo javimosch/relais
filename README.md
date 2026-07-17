@@ -25,6 +25,36 @@ curl -s https://relais.intrane.fr/v1/messages -H 'Authorization: Bearer rk_…' 
 A captured message is `{id, method, path, headers, body, ip, received_at}`. Secrets
 (`Authorization`, `Cookie`) are never stored; the body is capped at 60 KB.
 
+## 60-second proof: catch a real GitHub webhook
+
+The exact flow every agent integration hits — receive an event you have no address
+for — end to end, with the agent *blocking* on `/v1/wait` until it lands:
+
+```sh
+# 1. make an inbox
+I=$(curl -s -X POST https://relais.intrane.fr/v1/inboxes -d '{"label":"gh"}')
+CATCH=$(echo "$I" | jq -r .catch_url); TOK=$(echo "$I" | jq -r .token)
+
+# 2. block on it (this parks until something arrives — no poll loop)
+curl -s "https://relais.intrane.fr/v1/wait?timeout_ms=45000" -H "Authorization: Bearer $TOK" &
+
+# 3. point a REAL GitHub webhook at the catch URL — GitHub fires a ping on creation
+gh api repos/<you>/<repo>/hooks -X POST -f name=web -F active=true \
+  -f 'events[]=push' -f "config[url]=$CATCH" -f 'config[content_type]=json'
+```
+
+The blocked `/v1/wait` returns the moment GitHub's ping arrives:
+
+```json
+{"waiting":false,"message":{"method":"POST",
+  "headers":{"x-github-event":"ping","content-type":"application/json"},
+  "body":"{\"zen\":\"Half measures are as bad as nothing at all.\",\"hook_id\":653798437,…}"}}
+```
+
+A real third party delivered a real webhook to an agent that otherwise had no way to
+receive one — caught, blocked-on, and read. That's the OAuth-callback / CI-completion /
+Stripe-webhook flow, in three curls.
+
 ## Why this exists
 
 Agents can *call* any API — that's the easy half. The hard half is being *called back*,
