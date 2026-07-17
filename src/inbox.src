@@ -25,6 +25,7 @@ func handle_inbox_create(req) (res) {
 
     id := "in_" + substr(newid(), 0, 14)
     tok := "rk_" + newid()
+    base := public_url(req)
     // persistent inbox if the caller pays via peage; else free ephemeral
     code, detail := peage_charge_inbox(req, "inbox_" + id)
     if code == "declined" {
@@ -41,11 +42,14 @@ func handle_inbox_create(req) (res) {
         ttl = paid_ttl()
         maxm = 10000
         note = ",\"peage_receipt\":" + json(detail)
+    } else {
+        // free inbox: teach the peage upgrade path inline so a wallet-less agent
+        // can self-serve a persistent inbox when it needs a stable URL.
+        note = ",\"persist\":{\"why\":\"this inbox expires in 1h. For a stable URL (register with Stripe/GitHub/an OAuth app) get a 30-day inbox for " + str(relais_price()) + " cents via peage\",\"how\":[\"1. wallet: curl -s -X POST " + peage_url() + "/v1/wallets -d '{}' (save the token; " + peage_url() + "/llms.txt)\",\"2. fund it: curl -s -X POST " + peage_url() + "/v1/topup -H 'Authorization: Bearer pw_...' -d '{\\\"amount_cents\\\":500}' -> a Stripe URL your human pays once\",\"3. re-create here with the wallet: curl -s -X POST " + base + "/v1/inboxes -H 'X-Peage-Wallet: pw_...' -d '{\\\"label\\\":\\\"...\\\"}'\"]}"
     }
     exp := now() + ttl
     sqlite_exec(db, "INSERT INTO inboxes(id, token, email, label, plan, max_msgs, msg_total, expires_at, created_at) VALUES(?,?,?,?,?,?,0,?,?)", []string{id, tok_hash(tok), email, label, plan, str(maxm), str(exp), str(now())})
     sqlite_close(db)
-    base := public_url(req)
     write(2, "{\"event\":\"inbox_created\",\"inbox\":\"" + id + "\",\"plan\":\"" + plan + "\"}\n")
     res = created("{\"ok\":1,\"inbox_id\":\"" + id + "\",\"token\":\"" + tok + "\",\"plan\":\"" + plan + "\",\"expires_at\":" + str(exp) +
         ",\"catch_url\":\"" + base + "/c/" + id + "\"" +

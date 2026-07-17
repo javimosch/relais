@@ -19,10 +19,13 @@ func llms_txt(base) (t) {
         "## Persistent inboxes (peage)\n\n" +
         "A free inbox is ephemeral (expires in 1h, 100 messages) — perfect for a one-shot\n" +
         "OAuth dance. Need a STABLE URL to register with a provider (Stripe/GitHub webhook,\n" +
-        "an OAuth app)? Pay for a persistent inbox (30-day TTL, 10000 messages) with a\n" +
-        "peage wallet — add one header:\n" +
-        "   curl -s -X POST " + base + "/v1/inboxes -H 'X-Peage-Wallet: pw_..' -d '{\"label\":\"stripe prod\"}'\n" +
-        "   No wallet? " + peage_url() + "/llms.txt — create one, your human funds it once.\n\n" +
+        "an OAuth app)? Pay for a persistent inbox (30-day TTL, 10000 messages) for " + str(relais_price()) + " cents\n" +
+        "with a peage wallet. Full path if you don't have a wallet yet (paid via " + peage_url() + "):\n" +
+        "   1. mint a wallet:  curl -s -X POST " + peage_url() + "/v1/wallets -d '{}'   (save the pw_ token)\n" +
+        "   2. fund it:        curl -s -X POST " + peage_url() + "/v1/topup -H 'Authorization: Bearer pw_..' -d '{\"amount_cents\":500}'\n" +
+        "                      -> a Stripe Checkout URL; hand it to your human, they pay once\n" +
+        "   3. buy the inbox:  curl -s -X POST " + base + "/v1/inboxes -H 'X-Peage-Wallet: pw_..' -d '{\"label\":\"stripe prod\"}'\n" +
+        "   peage is the pay-per-call rail for agents (" + peage_url() + "/llms.txt); relais is one of its merchants.\n\n" +
         "## Endpoints\n\n" +
         "POST   /v1/inboxes {email?, label?}              -> {inbox_id, token, catch_url}  (X-Peage-Wallet = persistent)\n" +
         "ANY    /c/<inbox_id>                             -> capture a request (this is catch_url; public)\n" +
