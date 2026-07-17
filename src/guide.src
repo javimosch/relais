@@ -1,0 +1,65 @@
+// The agent-facing interface: /llms.txt is the front door; /guide is JSON.
+
+func llms_txt(base) (t) {
+    t = "# relais — an inbox your agent can block on\n\n" +
+        "Ephemeral and local agents have no public URL, so they can't RECEIVE anything —\n" +
+        "OAuth callbacks, 'your job finished' webhooks, payment confirmations, human\n" +
+        "approvals. relais gives your agent a URL that catches any HTTP request, and a\n" +
+        "long-poll it can block on until something lands. No crypto, no OAuth, all curl.\n" +
+        "Base URL: " + base + "\n\n" +
+        "## The whole thing in 3 curls\n\n" +
+        "1. Make an inbox (save the token — shown once):\n" +
+        "   curl -s -X POST " + base + "/v1/inboxes -d '{\"label\":\"my oauth callback\"}'\n" +
+        "   -> {\"inbox_id\":\"in_..\",\"token\":\"rk_..\",\"catch_url\":\"" + base + "/c/in_..\"}\n" +
+        "2. Give catch_url to whatever should reach you (an OAuth redirect_uri, a webhook\n" +
+        "   config, a form action, another agent). Anything sent there is captured.\n" +
+        "3. Block until it arrives (or read the backlog):\n" +
+        "   curl -s " + base + "/v1/wait -H 'Authorization: Bearer rk_..'     # blocks ~25s\n" +
+        "   curl -s " + base + "/v1/messages -H 'Authorization: Bearer rk_..' # the backlog\n\n" +
+        "## Persistent inboxes (peage)\n\n" +
+        "A free inbox is ephemeral (expires in 1h, 100 messages) — perfect for a one-shot\n" +
+        "OAuth dance. Need a STABLE URL to register with a provider (Stripe/GitHub webhook,\n" +
+        "an OAuth app)? Pay for a persistent inbox (30-day TTL, 10000 messages) with a\n" +
+        "peage wallet — add one header:\n" +
+        "   curl -s -X POST " + base + "/v1/inboxes -H 'X-Peage-Wallet: pw_..' -d '{\"label\":\"stripe prod\"}'\n" +
+        "   No wallet? " + peage_url() + "/llms.txt — create one, your human funds it once.\n\n" +
+        "## Endpoints\n\n" +
+        "POST   /v1/inboxes {email?, label?}              -> {inbox_id, token, catch_url}  (X-Peage-Wallet = persistent)\n" +
+        "ANY    /c/<inbox_id>                             -> capture a request (this is catch_url; public)\n" +
+        "GET    /v1/messages       Bearer <token>         -> up to 50 captured messages (marks them read)\n" +
+        "GET    /v1/wait           Bearer <token>         -> long-poll: block until one new message (?timeout_ms=, max 55000)\n" +
+        "DELETE /v1/messages       Bearer <token>         -> clear read messages\n" +
+        "DELETE /v1/inbox          Bearer <token>         -> delete the inbox\n" +
+        "GET    /_health                                  -> liveness\n\n" +
+        "A captured message is {id, method, path, headers, body, ip, received_at}. Secrets\n" +
+        "(Authorization, Cookie) are NOT stored; the body is capped at 60 KB.\n"
+}
+
+func guide_json(base) (j) {
+    j = "{\"name\":\"relais\",\"version\":\"" + app_version() + "\",\"tagline\":\"an inbox your agent can block on — catch webhooks, OAuth callbacks and approvals from any ephemeral agent\"," +
+        "\"base_url\":" + json(base) + ",\"free_ttl_seconds\":" + str(free_ttl()) + ",\"paid_ttl_seconds\":" + str(paid_ttl()) + ",\"persistent_price_cents\":" + str(relais_price()) + ",\"pay_rail\":\"peage\"," +
+        "\"flow\":[\"POST /v1/inboxes -> save token + catch_url\",\"give catch_url to whatever should reach you\",\"GET /v1/wait to block until it arrives (or /v1/messages for the backlog)\"]," +
+        "\"endpoints\":[" +
+        "{\"method\":\"POST\",\"path\":\"/v1/inboxes\",\"body\":{\"email\":\"optional\",\"label\":\"optional\"},\"headers\":{\"X-Peage-Wallet\":\"optional -> persistent inbox\"},\"returns\":\"inbox_id + token (once) + catch_url\"}," +
+        "{\"method\":\"ANY\",\"path\":\"/c/<inbox_id>\",\"note\":\"public catch endpoint (this is catch_url) — captures method, path, safe headers, body\"}," +
+        "{\"method\":\"GET\",\"path\":\"/v1/messages\",\"auth\":\"Bearer token\",\"note\":\"lists + marks read\"}," +
+        "{\"method\":\"GET\",\"path\":\"/v1/wait\",\"auth\":\"Bearer token\",\"query\":\"timeout_ms (default 25000, max 55000)\",\"note\":\"long-poll: blocks until one new message\"}," +
+        "{\"method\":\"DELETE\",\"path\":\"/v1/messages\",\"auth\":\"Bearer token\"}," +
+        "{\"method\":\"DELETE\",\"path\":\"/v1/inbox\",\"auth\":\"Bearer token\"}" +
+        "]}"
+}
+
+func help_text() (h) {
+    h = "relais — an inbox your agent can block on (single binary)\n\n" +
+        "usage: relais <command>\n\n" +
+        "  serve [-port 8796]           run the HTTP service ($PORT respected)\n" +
+        "  inbox-new [-label x]         mint an inbox + token (operator)\n" +
+        "  inboxes [-limit 50]          list inboxes as JSON\n" +
+        "  stats                        totals: inboxes, messages, plans\n" +
+        "  guide | version | help | help-json\n\n" +
+        "env: RELAIS_DB RELAIS_PUBLIC_URL RELAIS_FREE_TTL RELAIS_PAID_TTL RELAIS_PRICE_CENTS PEAGE_MERCHANT_KEY PEAGE_URL\n"
+}
+
+func help_json() (h) {
+    h = "{\"name\":\"relais\",\"version\":\"" + app_version() + "\",\"commands\":[\"serve\",\"inbox-new\",\"inboxes\",\"stats\",\"guide\",\"version\",\"help\",\"help-json\"]}"
+}

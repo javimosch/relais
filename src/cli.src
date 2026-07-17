@@ -1,0 +1,52 @@
+// Operator CLI. Agent-first: stdout = JSON, stderr = structured errors.
+
+func out_ok(data_json) {
+    println("{\"ok\":true,\"data\":" + data_json + "}")
+}
+
+func fail(code, msg) {
+    write(2, "{\"ok\":false,\"error\":" + json(msg) + ",\"code\":" + str(code) + "}\n")
+    exit(code)
+}
+
+func opt(a, name, def) (val) {
+    val = def
+    i := 0
+    while i < len(a) {
+        if a[i] == name && i + 1 < len(a) { val = a[i + 1] }
+        i = i + 1
+    }
+}
+
+func need_db() (db) {
+    db = db_open()
+    if db == 0 { fail(110, "cannot open database at " + db_path()) }
+    db_migrate(db)
+}
+
+func cmd_inbox_new(a) {
+    db := need_db()
+    label := opt(a, "-label", "")
+    ttl := paid_ttl()   // operator-minted inboxes are persistent
+    id := "in_" + substr(newid(), 0, 14)
+    tok := "rk_" + newid()
+    sqlite_exec(db, "INSERT INTO inboxes(id, token, email, label, plan, max_msgs, msg_total, expires_at, created_at) VALUES(?,?,'',?,'paid',10000,0,?,?)", []string{id, tok_hash(tok), label, str(now() + ttl), str(now())})
+    sqlite_close(db)
+    out_ok("{\"inbox_id\":\"" + id + "\",\"token\":\"" + tok + "\",\"catch_path\":\"/c/" + id + "\"}")
+}
+
+func cmd_inboxes(a) {
+    db := need_db()
+    sweep_expired(db)
+    rows := sqlite_query(db, "SELECT " + inbox_cols() + " FROM inboxes ORDER BY created_at DESC LIMIT " + str(parse_int(opt(a, "-limit", "50"))), []string{})
+    sqlite_close(db)
+    out_ok(rows)
+}
+
+func cmd_stats() {
+    db := need_db()
+    sweep_expired(db)
+    rows := sqlite_query(db, "SELECT (SELECT COUNT(*) FROM inboxes) AS inboxes, (SELECT COUNT(*) FROM inboxes WHERE plan='paid') AS paid_inboxes, (SELECT COUNT(*) FROM messages) AS messages, (SELECT COUNT(*) FROM messages WHERE read=0) AS unread", []string{})
+    sqlite_close(db)
+    out_ok(rows)
+}

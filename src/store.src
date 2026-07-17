@@ -1,0 +1,123 @@
+// SQLite persistence for relais. One short-lived handle per operation
+// (WAL + busy_timeout are safe under machweb's goroutine-per-connection model).
+
+func db_path() (p) {
+    p = env("RELAIS_DB")
+    if p == "" { p = env("HOME") + "/.relais/data.db" }
+}
+
+func db_open() (db) {
+    p := db_path()
+    i := len(p) - 1
+    while i > 0 && substr(p, i, i + 1) != "/" { i = i - 1 }
+    if i > 0 { system("mkdir -p " + substr(p, 0, i)) }
+    db = sqlite_open(p)
+    if db == 0 { return }
+    sqlite_exec(db, "PRAGMA journal_mode=WAL")
+    sqlite_exec(db, "PRAGMA busy_timeout=5000")
+}
+
+func db_migrate(db) {
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS inboxes(id TEXT PRIMARY KEY, token TEXT UNIQUE, email TEXT DEFAULT '', label TEXT DEFAULT '', plan TEXT DEFAULT 'free', max_msgs INTEGER DEFAULT 100, msg_total INTEGER DEFAULT 0, expires_at INTEGER, created_at INTEGER)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, inbox_id TEXT, method TEXT, path TEXT, headers TEXT, body TEXT, ip TEXT DEFAULT '', read INTEGER DEFAULT 0, received_at INTEGER)")
+    sqlite_exec(db, "CREATE INDEX IF NOT EXISTS idx_msg_inbox ON messages(inbox_id, received_at)")
+    sqlite_exec(db, "CREATE INDEX IF NOT EXISTS idx_msg_unread ON messages(inbox_id, read, received_at)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, win INTEGER, n INTEGER)")
+}
+
+// ---- shared helpers ----
+
+func unq(s) (out) {
+    out = s
+    if len(s) >= 2 && has_prefix(s, "\"") && has_suffix(s, "\"") {
+        out = substr(s, 1, len(s) - 1)
+    }
+}
+
+func newid() (id) { id = to_hex(rand_bytes(16)) }
+
+// tokens are stored hashed — a leaked DB snapshot cannot be replayed
+func tok_hash(t) (h) { h = sha256(t) }
+
+func free_ttl() (t) {
+    t = parse_int(env("RELAIS_FREE_TTL"))
+    if env("RELAIS_FREE_TTL") == "" { t = 3600 }
+}
+
+func paid_ttl() (t) {
+    t = parse_int(env("RELAIS_PAID_TTL"))
+    if env("RELAIS_PAID_TTL") == "" { t = 2592000 }   // 30 days
+}
+
+func public_url(req) (u) {
+    u = env("RELAIS_PUBLIC_URL")
+    if u == "" { u = base_url(req) }
+}
+
+// Fixed-window rate limit: true = allowed. Window of `secs`, max `max` hits.
+func rate_allow(db, key, secs, max) (allowed) {
+    win := now() / secs
+    sqlite_exec(db, "INSERT INTO ratelimit(k, win, n) VALUES(?,?,1) ON CONFLICT(k) DO UPDATE SET n = CASE WHEN win = " + str(win) + " THEN n + 1 ELSE 1 END, win = " + str(win), []string{key, str(win)})
+    rows := sqlite_query(db, "SELECT n FROM ratelimit WHERE k = ?", []string{key})
+    v, _ := json_get(rows, "[0].n")
+    allowed = parse_int(v) <= max
+}
+
+func bearer_token(req) (t) {
+    t = header(req, "authorization")
+    if has_prefix(to_lower(t), "bearer ") { t = trim(substr(t, 7, len(t))) } else { t = "" }
+}
+
+// sweep_expired lazily deletes messages of inboxes past their TTL, then the
+// inbox rows themselves — no background thread, called on inbox access.
+func sweep_expired(db) {
+    sqlite_exec(db, "DELETE FROM messages WHERE inbox_id IN (SELECT id FROM inboxes WHERE expires_at < " + str(now()) + ")", []string{})
+    sqlite_exec(db, "DELETE FROM inboxes WHERE expires_at < " + str(now()), []string{})
+}
+
+// ---- rows ----
+
+type InboxRow struct {
+    id         string
+    email      string
+    label      string
+    plan       string
+    max_msgs   int
+    msg_total  int
+    expires_at int
+    created_at int
+}
+
+func inbox_cols() (c) {
+    c = "id, COALESCE(email,'') AS email, COALESCE(label,'') AS label, COALESCE(plan,'free') AS plan, COALESCE(max_msgs,100) AS max_msgs, COALESCE(msg_total,0) AS msg_total, expires_at, created_at"
+}
+
+func inbox_by_token(db, tok) (b, ok) {
+    ok = 0
+    if len(tok) < 16 { return }
+    rows := sqlite_query(db, "SELECT " + inbox_cols() + " FROM inboxes WHERE token = ?", []string{tok_hash(tok)})
+    list := parse(rows, []InboxRow{})
+    if len(list) > 0 { b = list[0]  ok = 1 }
+}
+
+func inbox_by_id(db, id) (b, ok) {
+    ok = 0
+    rows := sqlite_query(db, "SELECT " + inbox_cols() + " FROM inboxes WHERE id = ?", []string{id})
+    list := parse(rows, []InboxRow{})
+    if len(list) > 0 { b = list[0]  ok = 1 }
+}
+
+type MessageRow struct {
+    id          string
+    method      string
+    path        string
+    headers     string
+    body        string
+    ip          string
+    read        int
+    received_at int
+}
+
+func message_cols() (c) {
+    c = "id, method, COALESCE(path,'') AS path, COALESCE(headers,'') AS headers, COALESCE(body,'') AS body, COALESCE(ip,'') AS ip, COALESCE(read,0) AS read, received_at"
+}

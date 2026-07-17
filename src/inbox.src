@@ -1,0 +1,203 @@
+// The inbox lifecycle.
+//   POST   /v1/inboxes           {email?, label?}   [X-Peage-Wallet -> persistent]
+//   ANY    /c/<inbox_id>         public catch endpoint — captures the request
+//   GET    /v1/messages          Bearer <token>     list + mark read
+//   GET    /v1/wait              Bearer <token>     long-poll: block until a message
+//   DELETE /v1/messages          Bearer <token>     clear read messages
+//   DELETE /v1/inbox             Bearer <token>     delete the inbox
+
+func handle_inbox_create(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    if rate_allow(db, "ic:" + client_ip(req), 3600, 20) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":0,\"error\":\"too many inboxes — slow down\"}")
+        return
+    }
+    sweep_expired(db)
+    emv, emerr := json_get(req.body, ".email")
+    lbv, lberr := json_get(req.body, ".label")
+    email := ""
+    if emerr == "" { email = unq(emv) }
+    label := ""
+    if lberr == "" { label = unq(lbv) }
+    if len(label) > 80 { label = substr(label, 0, 80) }
+
+    id := "in_" + substr(newid(), 0, 14)
+    tok := "rk_" + newid()
+    // persistent inbox if the caller pays via peage; else free ephemeral
+    code, detail := peage_charge_inbox(req, "inbox_" + id)
+    if code == "declined" {
+        sqlite_close(db)
+        res = response("402 Payment Required", "application/json", detail)
+        return
+    }
+    plan := "free"
+    ttl := free_ttl()
+    maxm := 100
+    note := ""
+    if code == "ok" {
+        plan = "paid"
+        ttl = paid_ttl()
+        maxm = 10000
+        note = ",\"peage_receipt\":" + json(detail)
+    }
+    exp := now() + ttl
+    sqlite_exec(db, "INSERT INTO inboxes(id, token, email, label, plan, max_msgs, msg_total, expires_at, created_at) VALUES(?,?,?,?,?,?,0,?,?)", []string{id, tok_hash(tok), email, label, plan, str(maxm), str(exp), str(now())})
+    sqlite_close(db)
+    base := public_url(req)
+    write(2, "{\"event\":\"inbox_created\",\"inbox\":\"" + id + "\",\"plan\":\"" + plan + "\"}\n")
+    res = created("{\"ok\":1,\"inbox_id\":\"" + id + "\",\"token\":\"" + tok + "\",\"plan\":\"" + plan + "\",\"expires_at\":" + str(exp) +
+        ",\"catch_url\":\"" + base + "/c/" + id + "\"" +
+        ",\"read_url\":\"" + base + "/v1/messages\"" + note +
+        ",\"next\":\"give catch_url to whatever should reach your agent (OAuth redirect, webhook, form). Read with GET /v1/messages (Bearer token), or block on GET /v1/wait until something arrives.\"}")
+}
+
+// ANY /c/<inbox_id> — the public catch endpoint. Captures method, path tail,
+// a header digest, and the body (binary-safe via body_bytes text view).
+func handle_catch(req) (res) {
+    id := param(pathof(req), "/c/")
+    if id == "" { res = response("404 Not Found", "application/json", "{\"ok\":0,\"error\":\"no inbox id in path\"}")  return }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    sweep_expired(db)
+    b, ok := inbox_by_id(db, id)
+    if ok == 0 {
+        sqlite_close(db)
+        res = response("404 Not Found", "application/json", "{\"ok\":0,\"error\":\"unknown or expired inbox\"}")
+        return
+    }
+    if b.msg_total >= b.max_msgs {
+        sqlite_close(db)
+        res = response("507 Insufficient Storage", "application/json", "{\"ok\":0,\"error\":\"inbox full (max " + str(b.max_msgs) + " messages) — read/clear it, or use a persistent inbox (X-Peage-Wallet)\"}")
+        return
+    }
+    // capture a compact, safe header digest (skip auth/cookie, cap length)
+    hdr := capture_headers(req)
+    body := req.body
+    if len(body) > 60000 { body = substr(body, 0, 60000) }
+    qtail := ""
+    qi := index(req.path, "?")
+    if qi >= 0 { qtail = substr(req.path, qi, len(req.path)) }
+    mid := "m_" + newid()
+    sqlite_exec(db, "INSERT INTO messages(id, inbox_id, method, path, headers, body, ip, read, received_at) VALUES(?,?,?,?,?,?,?,0,?)", []string{mid, id, req.method, qtail, hdr, body, client_ip(req), str(now())})
+    sqlite_exec(db, "UPDATE inboxes SET msg_total = msg_total + 1 WHERE id = ?", []string{id})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"captured\":true,\"message_id\":\"" + mid + "\"}")
+}
+
+// capture_headers builds a JSON object of useful request headers, dropping
+// secrets (authorization/cookie) and anything oversized.
+func capture_headers(req) (j) {
+    keep := []string{"content-type", "user-agent", "x-forwarded-for", "x-github-event", "x-hub-signature-256", "stripe-signature", "x-event-type", "origin", "referer"}
+    j = "{"
+    n := 0
+    for _, k := range keep {
+        v := header(req, k)
+        if v != "" {
+            if len(v) > 400 { v = substr(v, 0, 400) }
+            if n > 0 { j = j + "," }
+            j = j + json(k) + ":" + json(v)
+            n = n + 1
+        }
+    }
+    j = j + "}"
+}
+
+func messages_json(db, inbox_id, limit) (j) {
+    rows := sqlite_query(db, "SELECT " + message_cols() + " FROM messages WHERE inbox_id = ? ORDER BY received_at DESC LIMIT " + str(limit), []string{inbox_id})
+    list := parse(rows, []MessageRow{})
+    // build manually so `headers` is a nested object (the stored column is JSON
+    // text; returning the raw row would double-encode it as a string)
+    j = "["
+    i := 0
+    while i < len(list) {
+        if i > 0 { j = j + "," }
+        j = j + row_to_json(list[i])
+        i = i + 1
+    }
+    j = j + "]"
+}
+
+func handle_messages(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    sweep_expired(db)
+    b, ok := inbox_by_token(db, bearer_token(req))
+    if ok == 0 {
+        sqlite_close(db)
+        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"unknown inbox token\"}")
+        return
+    }
+    msgs := messages_json(db, b.id, 50)
+    sqlite_exec(db, "UPDATE messages SET read = 1 WHERE inbox_id = ? AND read = 0", []string{b.id})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"inbox_id\":\"" + b.id + "\",\"plan\":\"" + b.plan + "\",\"messages\":" + msgs + "}")
+}
+
+// GET /v1/wait — long-poll. Blocks up to `timeout_ms` (default 25s, max 55s) for
+// a new (unread) message, returns it immediately, marks it read. {waiting:false}
+// on timeout. This is the primitive an agent curls to block until its callback lands.
+func handle_wait(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    b, ok := inbox_by_token(db, bearer_token(req))
+    if ok == 0 {
+        sqlite_close(db)
+        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"unknown inbox token\"}")
+        return
+    }
+    tmo := parse_int(query(req, "timeout_ms"))
+    if tmo <= 0 { tmo = 25000 }
+    if tmo > 55000 { tmo = 55000 }
+    waited := 0
+    for {
+        rows := sqlite_query(db, "SELECT " + message_cols() + " FROM messages WHERE inbox_id = ? AND read = 0 ORDER BY received_at ASC LIMIT 1", []string{b.id})
+        list := parse(rows, []MessageRow{})
+        if len(list) > 0 {
+            m := list[0]
+            sqlite_exec(db, "UPDATE messages SET read = 1 WHERE id = ?", []string{m.id})
+            sqlite_close(db)
+            res = ok_json("{\"ok\":1,\"waiting\":false,\"message\":" + row_to_json(m) + "}")
+            return
+        }
+        if waited >= tmo { break }
+        sleep(1000)
+        waited = waited + 1000
+    }
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"waiting\":false,\"timeout\":true,\"message\":null,\"hint\":\"nothing arrived in the window — call /v1/wait again to keep blocking\"}")
+}
+
+func row_to_json(m) (j) {
+    j = "{\"id\":\"" + m.id + "\",\"method\":" + json(m.method) + ",\"path\":" + json(m.path) + ",\"headers\":" + m.headers + ",\"body\":" + json(m.body) + ",\"ip\":" + json(m.ip) + ",\"received_at\":" + str(m.received_at) + "}"
+}
+
+func handle_messages_clear(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    b, ok := inbox_by_token(db, bearer_token(req))
+    if ok == 0 {
+        sqlite_close(db)
+        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"unknown inbox token\"}")
+        return
+    }
+    sqlite_exec(db, "DELETE FROM messages WHERE inbox_id = ? AND read = 1", []string{b.id})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"cleared\":true}")
+}
+
+func handle_inbox_delete(req) (res) {
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
+    b, ok := inbox_by_token(db, bearer_token(req))
+    if ok == 0 {
+        sqlite_close(db)
+        res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"unknown inbox token\"}")
+        return
+    }
+    sqlite_exec(db, "DELETE FROM messages WHERE inbox_id = ?", []string{b.id})
+    sqlite_exec(db, "DELETE FROM inboxes WHERE id = ?", []string{b.id})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":1,\"deleted\":true}")
+}

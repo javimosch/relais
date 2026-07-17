@@ -1,0 +1,43 @@
+// Optional peage payment for a PERSISTENT inbox. A caller that sends an
+// X-Peage-Wallet header when creating an inbox pays RELAIS_PRICE_CENTS (default 5)
+// through the peage rail (https://peage.intrane.fr) and gets a long-lived inbox
+// (30-day TTL, high message cap). Free inboxes stay ephemeral (1h). Unconfigured
+// relais instances silently skip the charge — metering is additive.
+
+func relais_price() (c) {
+    c = parse_int(env("RELAIS_PRICE_CENTS"))
+    if env("RELAIS_PRICE_CENTS") == "" { c = 5 }
+}
+
+func peage_url() (u) {
+    u = env("PEAGE_URL")
+    if u == "" { u = "https://peage.intrane.fr" }
+}
+
+// peage_charge_inbox charges the caller's wallet for one persistent inbox.
+// code: "free" (no wallet / not configured — caller gets a free inbox)
+//     | "ok"    (paid — detail is the signed receipt)
+//     | "declined" (detail is peage's error body, passed through verbatim)
+func peage_charge_inbox(req, idem) (code, detail) {
+    code = "free"
+    detail = ""
+    w := header(req, "x-peage-wallet")
+    if w == "" { return code, detail }
+    key := env("PEAGE_MERCHANT_KEY")
+    if key == "" { return code, detail }   // not configured -> treat as free
+    body := "{\"wallet_token\":" + json(w) + ",\"amount_cents\":" + str(relais_price()) + ",\"memo\":\"relais persistent inbox\",\"idempotency_key\":" + json(idem) + "}"
+    status, resp, herr := http_request("POST", peage_url() + "/v1/charge", []string{"content-type: application/json", "authorization: Bearer " + key}, body)
+    if herr != "" {
+        code = "declined"
+        detail = "{\"ok\":0,\"error\":\"peage unreachable — retry, or omit the wallet header for a free ephemeral inbox\"}"
+        return code, detail
+    }
+    if status == 200 {
+        rc, _ := json_get(resp, ".receipt")
+        code = "ok"
+        detail = unq(rc)
+        return code, detail
+    }
+    code = "declined"
+    detail = resp
+}

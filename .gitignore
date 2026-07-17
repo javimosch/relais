@@ -1,0 +1,6 @@
+relais
+app.mfl
+src/landing_gen.src
+*.db
+*.db-wal
+*.db-shm
