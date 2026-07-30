@@ -79,6 +79,12 @@ péage is the pay half of the agent web; relais is the receive half.
 ## Build & run
 
 ```sh
+# Linux x86_64, statically linked — no runtime dependencies, no glibc floor
+# (runs on Alpine and FROM scratch too):
+curl -fsSL https://github.com/javimosch/relais/releases/latest/download/relais-linux-x86_64 -o relais
+chmod +x relais && ./relais help
+
+# ...or build it yourself (needs machin):
 ./build.sh     # machin encode + build -> ./relais
 ./test.sh      # 25-assertion end-to-end (mocked peage)
 RELAIS_PUBLIC_URL=https://relais.intrane.fr PEAGE_MERCHANT_KEY=pm_… ./relais serve -port 8796
