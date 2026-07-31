@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# A project's own test suite is not a user. It runs the binary many times in a
+# fresh environment, which to usage telemetry is indistinguishable from many new
+# machines — poche's suite alone put 363 fabricated events into the collector.
+# cli-telemetry-spec §2.2.1: harnesses that run binaries must set this.
+export DO_NOT_TRACK=1
+
 # End-to-end smoke: inbox lifecycle, catch, read, long-poll (blocking), persistent
 # inbox via a mocked peage /v1/charge, abuse caps. Exits non-zero on first failure.
 set -euo pipefail
