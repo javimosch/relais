@@ -1,6 +1,6 @@
 // relais — CLI entry point and command routing.
 
-func app_version() (v) { v = "0.1.2" }
+func app_version() (v) { v = "0.2.0" }
 
 func resolve_port(a) (port) {
     p := opt(a, "-port", env("PORT"))
@@ -29,6 +29,15 @@ func main() {
         out_ok("{\"version\":\"" + app_version() + "\"}")
     } else if cmd == "help-json" {
         println(help_json())
+    } else if cmd == "telemetry" {
+        if tel_hasflag(a, "--telemetry-off") == 1 {
+            td, tok := tel_set(0)
+            println(td)
+            if tok == 0 { exit(90) }
+        } else if tel_hasflag(a, "--telemetry-on") == 1 {
+            td, tok := tel_set(1)
+            println(td)
+        } else { println(tel_status_json()) }
     } else if cmd == "help" || cmd == "--help" || cmd == "-h" {
         println(help_text())
     } else {
@@ -43,4 +52,7 @@ func main() {
         println(help_text())
         exit(80)
     }
+    // After the verb finished and its result is on stdout, so telemetry can
+    // never be why a command felt slow or why one failed.
+    tel_report(cmd, 0)
 }

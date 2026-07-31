@@ -79,6 +79,10 @@ péage is the pay half of the agent web; relais is the receive half.
 ## Build & run
 
 ```sh
+# `relais telemetry` shows exactly what it reports about itself; disable with
+# RELAIS_TELEMETRY=0 or DO_NOT_TRACK=1. It never sends inbox contents, tokens
+# or URLs — only version, os/arch, which verb ran and whether it failed.
+
 # Linux x86_64, statically linked — no runtime dependencies, no glibc floor
 # (runs on Alpine and FROM scratch too):
 curl -fsSL https://github.com/javimosch/relais/releases/latest/download/relais-linux-x86_64 -o relais
