@@ -102,6 +102,13 @@ Env: `RELAIS_DB` (default `~/.relais/data.db`) · `RELAIS_PUBLIC_URL` · `RELAIS
 
 ```
 relais inbox-new [-label x]   relais inboxes [-limit n]   relais stats
+relais feedback "message" [-kind bug|idea|praise|note] [-context text]
+relais update [--check|--force]
 ```
+
+`feedback` dual-writes to the local `/v1/feedback` endpoint and the central relay
+(`FEEDBACK_RELAY=off` disables the relay). `update` compares `sha256[:12]`, verifies
+the full hash when advertised, smoke-tests `version`, and atomically swaps with a
+`.bak` rollback. Set `RELAIS_NO_NUDGE=1` to disable the passive update notice.
 
 Sibling of [peage](https://github.com/javimosch/peage) (pay), [grepapi](https://grepapi.intrane.fr) (find), [hart](https://github.com/javimosch/machin-hart) (show).

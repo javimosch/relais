@@ -21,4 +21,7 @@ LDD_OUT=$(ldd relais-linux-x86_64 2>&1 || true)
 case "$(file relais-linux-x86_64)" in *"statically linked"*) ;; *) echo "not static — refusing"; exit 1 ;; esac
 case "$LDD_OUT" in *"not a dynamic executable"*) ;; *) echo "has dynamic deps — refusing: $LDD_OUT"; exit 1 ;; esac
 ./relais-linux-x86_64 help >/dev/null 2>&1 || { echo "release binary does not run — refusing"; exit 1; }
-echo "release ok: $(wc -c < relais-linux-x86_64) bytes, static"
+sha256sum relais-linux-x86_64 > relais-linux-x86_64.sha256
+full=$(sha256sum relais-linux-x86_64 | awk '{print $1}')
+printf '{"ok":true,"version":"%s","download":"https://github.com/javimosch/relais/releases/latest/download/relais-linux-x86_64","sha256":"%s"}\n' "${full%${full#????????????}}" "$full" > version.json
+echo "release ok: $(wc -c < relais-linux-x86_64) bytes, static, manifest version ${full%${full#????????????}}"

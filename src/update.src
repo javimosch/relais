@@ -1,0 +1,141 @@
+// relais update — cli-update-spec: content-hash verify-then-swap + nudge.
+
+func relais_self_path() (p) {
+    p = env("RELAIS_BIN")
+    if len(read_file_bytes(p)) <= 10000 { p = args()[0] }
+    if contains(p, "/") == false {
+        code, out, _ := exec("command -v " + quote_for_shell(p))
+        if code == 0 && trim(out) != "" { p = trim(out) }
+    }
+    code2, out2, _ := exec("readlink -f " + quote_for_shell(p) + " 2>/dev/null")
+    if code2 == 0 && trim(out2) != "" { p = trim(out2) }
+}
+
+func relais_home() (h) { h = env("HOME") + "/.relais" }
+
+func relais_local_hash() (v) {
+    b := read_file_bytes(relais_self_path())
+    if len(b) == 0 { v = ""  return }
+    v = substr(to_hex(sha256_bytes(b)), 0, 12)
+}
+
+func quote_for_shell(s) (r) {
+    r = "'"
+    i := 0
+    while i < len(s) {
+        c := substr(s, i, i + 1)
+        if c == "'" { r = r + "'\\''" } else { r = r + c }
+        i = i + 1
+    }
+    r = r + "'"
+}
+
+func relais_safe_url(u) (ok) {
+    ok = 0
+    if has_prefix(u, "https://") { ok = 1  return }
+    if env("RELAIS_ALLOW_INSECURE_UPDATE") == "1" {
+        if has_prefix(u, "http://") || has_prefix(u, "file://") { ok = 1 }
+    }
+}
+
+func relais_version_url() (u) {
+    u = env("RELAIS_VERSION_URL")
+    if u == "" { u = "https://relais.intrane.fr/version.json" }
+}
+
+func relais_version_json() (res) {
+    dist := env("RELAIS_DIST")
+    if dist == "" { dist = relais_self_path() }
+    b := read_file_bytes(dist)
+    if len(b) == 0 { res = response("404 Not Found", "application/json", "{\"ok\":false,\"error\":\"artifact unavailable\"}")  return }
+    full := to_hex(sha256_bytes(b))
+    dl := env("RELAIS_UPDATE_URL")
+    if dl == "" { dl = "https://github.com/javimosch/relais/releases/latest/download/relais-linux-x86_64" }
+    res = response("200 OK", "application/json", "{\"ok\":true,\"version\":\"" + substr(full, 0, 12) + "\",\"download\":" + json(dl) + ",\"sha256\":\"" + full + "\"}")
+}
+
+func relais_update_nudge() {
+    if env("RELAIS_NO_NUDGE") == "1" { return }
+    local := relais_local_hash()
+    if len(local) != 12 { return }
+    cache := relais_home() + "/.nudge-cache"
+    last := parse_int(trim(read_file(cache)))
+    if last > 0 && now() - last < 3600 { return }
+    system("mkdir -p \"" + relais_home() + "\"")
+    write_file(cache, str(now()))
+    if relais_safe_url(relais_version_url()) == 0 { return }
+    code, out, _ := exec("curl -fsS -m 3 " + quote_for_shell(relais_version_url()))
+    if code != 0 { return }
+    rv, err := json_get(out, ".version")
+    if err == "" && unq(rv) != "" && unq(rv) != local {
+        write(2, "[update] a newer relais is available (" + local + " → " + unq(rv) + "). Run: relais update\n")
+    }
+}
+
+func cmd_update(a) {
+    check_only := 0
+    force := 0
+    i := 2
+    while i < len(a) {
+        if a[i] == "--check" { check_only = 1  i = i + 1  continue }
+        if a[i] == "--force" { force = 1  i = i + 1  continue }
+        fail(80, "usage: relais update [--check|--force]")
+    }
+    if check_only == 1 && force == 1 { fail(80, "update --check and --force are mutually exclusive") }
+
+    local := relais_local_hash()
+    if len(local) != 12 { fail(100, "cannot hash the running relais binary") }
+    status, body, err := http_request("GET", relais_version_url(), []string{}, "")
+    if status != 200 || err != "" { fail(100, "cannot reach version endpoint") }
+    rv, re := json_get(body, ".version")
+    dv, de := json_get(body, ".download")
+    if re != "" || de != "" || unq(rv) == "" || unq(dv) == "" { fail(100, "invalid update manifest") }
+    remote := unq(rv)
+    if relais_safe_url(unq(dv)) == 0 { fail(100, "invalid download URL") }
+    if local == remote && force == 0 {
+        out_ok("{\"version\":\"" + local + "\",\"up_to_date\":true,\"updated\":false}")
+        return
+    }
+    if check_only == 1 {
+        println("{\"ok\":true,\"local\":\"" + local + "\",\"remote\":\"" + remote + "\",\"up_to_date\":false,\"updated\":false}")
+        exit(5)
+    }
+
+    lock := "/tmp/relais-update.lock"
+    if len(read_file(lock)) > 0 { fail(100, "update already in progress") }
+    write_file(lock, str(now()))
+    self := relais_self_path()
+    tmp := self + ".new"
+    bak := self + ".bak"
+    dl := unq(dv)
+    if relais_safe_url(dl) == 0 { remove(lock); fail(100, "invalid download URL") }
+    if system("curl -fsSL -m 120 " + quote_for_shell(dl) + " -o " + quote_for_shell(tmp)) != 0 {
+        remove(lock); fail(100, "download failed")
+    }
+    candidate := read_file_bytes(tmp)
+    if len(candidate) < 10000 {
+        remove(tmp); remove(lock); fail(100, "candidate artifact is too small")
+    }
+    full := to_hex(sha256_bytes(candidate))
+    if substr(full, 0, 12) != remote {
+        remove(tmp); remove(lock); fail(100, "sha256 mismatch; refusing to install")
+    }
+    fs, _ := json_get(body, ".sha256")
+    advertised := unq(fs)
+    if len(advertised) == 64 && full != advertised {
+        remove(tmp); remove(lock); fail(100, "full sha256 mismatch; refusing to install")
+    }
+    system("chmod +x " + quote_for_shell(tmp))
+    code, out, _ := exec(quote_for_shell(tmp) + " version")
+    if code != 0 || len(trim(out)) == 0 {
+        remove(tmp); remove(lock); fail(100, "candidate version smoke test failed")
+    }
+    if system("mv -f " + quote_for_shell(self) + " " + quote_for_shell(bak) + " && mv -f " + quote_for_shell(tmp) + " " + quote_for_shell(self) + " && chmod +x " + quote_for_shell(self)) != 0 {
+        if system("mv -f " + quote_for_shell(bak) + " " + quote_for_shell(self) + " 2>/dev/null") != 0 {
+            remove(lock); fail(100, "swap failed and rollback failed; restore " + bak)
+        }
+        remove(lock); fail(100, "swap failed; rollback restored the previous binary")
+    }
+    remove(lock)
+    out_ok("{\"updated\":true,\"from\":\"" + local + "\",\"to\":\"" + remote + "\",\"backup\":\"" + bak + "\"}")
+}

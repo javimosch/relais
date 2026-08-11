@@ -23,6 +23,7 @@ func db_migrate(db) {
     sqlite_exec(db, "CREATE INDEX IF NOT EXISTS idx_msg_inbox ON messages(inbox_id, received_at)")
     sqlite_exec(db, "CREATE INDEX IF NOT EXISTS idx_msg_unread ON messages(inbox_id, read, received_at)")
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS ratelimit(k TEXT PRIMARY KEY, win INTEGER, n INTEGER)")
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY, kind TEXT, message TEXT, context TEXT, reporter TEXT, version TEXT, created_at INTEGER)")
 }
 
 // ---- shared helpers ----

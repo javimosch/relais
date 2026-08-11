@@ -33,9 +33,12 @@ func llms_txt(base) (t) {
         "GET    /v1/wait           Bearer <token>         -> long-poll: block until one new message (?timeout_ms=, max 55000)\n" +
         "DELETE /v1/messages       Bearer <token>         -> clear read messages\n" +
         "DELETE /v1/inbox          Bearer <token>         -> delete the inbox\n" +
-        "GET    /_health                                  -> liveness\n\n" +
+        "GET    /_health                                  -> liveness\n" +
+        "POST   /v1/feedback                              -> report a bug/idea (CLI dual-writes)\n" +
+        "GET    /version.json                             -> content-hash update manifest\n\n" +
         "A captured message is {id, method, path, headers, body, ip, received_at}. Secrets\n" +
-        "(Authorization, Cookie) are NOT stored; the body is capped at 60 KB.\n"
+        "(Authorization, Cookie) are NOT stored; the body is capped at 60 KB.\n\n" +
+        "The CLI is agent-first: `relais feedback` sends to its own /v1/feedback and the central relay; `relais update` verifies sha256[:12], smoke-tests `version`, and swaps atomically with a .bak.\n"
 }
 
 func guide_json(base) (j) {
@@ -48,8 +51,10 @@ func guide_json(base) (j) {
         "{\"method\":\"GET\",\"path\":\"/v1/messages\",\"auth\":\"Bearer token\",\"note\":\"lists + marks read\"}," +
         "{\"method\":\"GET\",\"path\":\"/v1/wait\",\"auth\":\"Bearer token\",\"query\":\"timeout_ms (default 25000, max 55000)\",\"note\":\"long-poll: blocks until one new message\"}," +
         "{\"method\":\"DELETE\",\"path\":\"/v1/messages\",\"auth\":\"Bearer token\"}," +
-        "{\"method\":\"DELETE\",\"path\":\"/v1/inbox\",\"auth\":\"Bearer token\"}" +
-        "]}"
+        "{\"method\":\"DELETE\",\"path\":\"/v1/inbox\",\"auth\":\"Bearer token\"}," +
+        "{\"method\":\"POST\",\"path\":\"/v1/feedback\",\"body\":{\"message\":\"required\",\"kind\":\"optional\",\"context\":\"optional\"},\"note\":\"open, rate-limited, dual-write CLI\"}," +
+        "{\"method\":\"GET\",\"path\":\"/version.json\",\"returns\":\"content-hash manifest\"}" +
+        "],\"commands\":{\"feedback\":\"relais feedback MESSAGE [-kind bug|idea|praise|note] [-context TEXT]\",\"update\":\"relais update [--check|--force]\"},\"env\":[\"RELAIS_FEEDBACK_URL\",\"FEEDBACK_RELAY\",\"RELAIS_VERSION_URL\",\"RELAIS_UPDATE_URL\",\"RELAIS_NO_NUDGE\"]}"
 }
 
 func help_text() (h) {
@@ -59,10 +64,11 @@ func help_text() (h) {
         "  inbox-new [-label x]         mint an inbox + token (operator)\n" +
         "  inboxes [-limit 50]          list inboxes as JSON\n" +
         "  stats                        totals: inboxes, messages, plans\n" +
-        "  guide | version | help | help-json\n\n" +
-        "env: RELAIS_DB RELAIS_PUBLIC_URL RELAIS_FREE_TTL RELAIS_PAID_TTL RELAIS_PRICE_CENTS PEAGE_MERCHANT_KEY PEAGE_URL\n"
+        "  guide | version | help | help-json\n" +
+        "  feedback <message> [-kind bug|idea|praise|note] [-context text]\n" +
+        "  update [--check|--force]\n\n" +        "  env: RELAIS_DB RELAIS_PUBLIC_URL RELAIS_FREE_TTL RELAIS_PAID_TTL RELAIS_PRICE_CENTS PEAGE_MERCHANT_KEY PEAGE_URL RELAIS_FEEDBACK_URL FEEDBACK_RELAY RELAIS_VERSION_URL RELAIS_UPDATE_URL RELAIS_NO_NUDGE\n"
 }
 
 func help_json() (h) {
-    h = "{\"name\":\"relais\",\"version\":\"" + app_version() + "\",\"commands\":[\"serve\",\"inbox-new\",\"inboxes\",\"stats\",\"guide\",\"version\",\"help\",\"help-json\"]}"
+    h = "{\"name\":\"relais\",\"version\":\"" + app_version() + "\",\"commands\":[\"serve\",\"inbox-new\",\"inboxes\",\"stats\",\"feedback\",\"update\",\"guide\",\"version\",\"help\",\"help-json\"],\"exit_codes\":{\"0\":\"success\",\"5\":\"update available (--check)\",\"80\":\"input/validation\",\"90\":\"precondition/resource\",\"100\":\"external/integration\",\"110\":\"internal\"},\"env\":[\"RELAIS_DB\",\"RELAIS_PUBLIC_URL\",\"RELAIS_FEEDBACK_URL\",\"RELAIS_VERSION_URL\",\"RELAIS_UPDATE_URL\",\"RELAIS_BIN\",\"RELAIS_NO_NUDGE\",\"FEEDBACK_RELAY\"]}"
 }
