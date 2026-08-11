@@ -13,6 +13,7 @@ cd "$(dirname "$0")"
 
 PORT=18796
 MOCK_PORT=18797
+UPDATE_PORT=18798
 DB=$(mktemp -d)/test.db
 export RELAIS_DB="$DB" RELAIS_PUBLIC_URL="http://127.0.0.1:$PORT"
 export PEAGE_MERCHANT_KEY="pm_test" PEAGE_URL="http://127.0.0.1:$MOCK_PORT"
@@ -36,7 +37,8 @@ PY
 MOCK=$!
 ./relais serve -port $PORT 2>/dev/null &
 SRV=$!
-trap 'kill $SRV $MOCK 2>/dev/null || true' EXIT
+UPD=""
+trap 'kill ${SRV:-} ${MOCK:-} ${UPD:-} 2>/dev/null || true; rm -f ./relais.bak ./relais.new' EXIT
 sleep 0.6
 
 J(){ python3 -c "import json,sys;d=json.load(sys.stdin);print(d$1)"; }
@@ -98,5 +100,96 @@ curl -sf -X DELETE "http://127.0.0.1:$PORT/v1/inbox" -H "Authorization: Bearer $
 # operator CLI
 ./relais inbox-new -label ops | grep -q '"ok":true' || fail cli-new; ok "cli inbox-new"
 ./relais stats | grep -q '"messages"' || fail cli-stats; ok "cli stats"
+
+echo "== agent-first CLI contract =="
+./relais version | grep -q '"tool":"relais"' || fail version-tool; ok "version identifies relais"
+./relais help-json | grep -q '"feedback"' || fail help-feedback; ok "help-json lists feedback"
+./relais help-json | grep -q '"update"' || fail help-update; ok "help-json lists update"
+FEEDBACK_RELAY=off ./relais feedback "smoke feedback" -kind note -context test | grep -q '"relayed":0' || fail feedback; ok "feedback relay opt-out"
+
+# Local feedback endpoint and dual-write: the running app owns /v1/feedback.
+LOCAL_FEEDBACK=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/feedback" -d '{"id":"smoke-fb-1","message":"hello"}')
+echo "$LOCAL_FEEDBACK" | grep -q '"stored":true' || fail feedback-http; ok "local feedback endpoint"
+
+# Update contract: a real local HTTP manifest/artifact server exercises stale,
+# hash rejection, candidate smoke rejection, and successful atomic replacement.
+UPDATE_DIR=$(mktemp -d)
+cp ./relais "$UPDATE_DIR/relais-new"
+printf '\nrelais smoke candidate\n' >> "$UPDATE_DIR/relais-new"
+chmod +x "$UPDATE_DIR/relais-new"
+NEW_HASH=$(sha256sum "$UPDATE_DIR/relais-new" | awk '{print $1}')
+cp "$UPDATE_DIR/relais-new" "$UPDATE_DIR/relais-valid"
+printf '{"ok":true,"version":"%s","download":"http://127.0.0.1:%s/artifact","sha256":"%s"}\n' "${NEW_HASH:0:12}" "$UPDATE_PORT" "$NEW_HASH" > "$UPDATE_DIR/version.json"
+python3 - "$UPDATE_DIR" "$UPDATE_PORT" <<'PY' &
+import http.server, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+port = int(sys.argv[2])
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == '/version.json':
+            body = (root / 'version.json').read_bytes()
+        elif self.path == '/artifact':
+            body = (root / 'relais-new').read_bytes()
+        else:
+            self.send_error(404); return
+        self.send_response(200)
+        self.send_header('content-type', 'application/octet-stream')
+        self.send_header('content-length', str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PY
+UPD=$!
+trap 'kill $SRV $MOCK $UPD 2>/dev/null || true; rm -rf "$UPDATE_DIR"' EXIT
+sleep 0.2
+export RELAIS_ALLOW_INSECURE_UPDATE=1
+export RELAIS_VERSION_URL="http://127.0.0.1:$UPDATE_PORT/version.json"
+set +e
+./relais update --check > /tmp/relais-update-check.json 2>/tmp/relais-update-check.err
+URC=$?
+set -e
+[ "$URC" = 5 ] || fail update-stale-exit; ok "update check reports stale with exit 5"
+grep -q '"up_to_date":false' /tmp/relais-update-check.json || fail update-stale-json; ok "stale update JSON is machine-readable"
+
+# Advertise a bad full hash: update must reject and leave the running binary intact.
+BEFORE=$(sha256sum ./relais | awk '{print $1}')
+printf '{"ok":true,"version":"%s","download":"http://127.0.0.1:%s/artifact","sha256":"%064d"}\n' "${NEW_HASH:0:12}" "$UPDATE_PORT" 0 > "$UPDATE_DIR/version.json"
+set +e
+./relais update > /tmp/relais-update-bad.json 2>/tmp/relais-update-bad.err
+BRC=$?
+set -e
+[ "$BRC" = 100 ] || fail update-bad-hash-exit
+[ "$(sha256sum ./relais | awk '{print $1}')" = "$BEFORE" ] || fail update-bad-hash-preserved
+ok "bad full hash is rejected without replacement"
+
+# A self-consistent but non-executable artifact must fail the version smoke test.
+printf 'not an executable artifact\n' > "$UPDATE_DIR/relais-new"
+head -c 12000 /dev/zero >> "$UPDATE_DIR/relais-new"
+chmod +x "$UPDATE_DIR/relais-new"
+BAD_CANDIDATE_HASH=$(sha256sum "$UPDATE_DIR/relais-new" | awk '{print $1}')
+printf '{"ok":true,"version":"%s","download":"http://127.0.0.1:%s/artifact","sha256":"%s"}\n' "${BAD_CANDIDATE_HASH:0:12}" "$UPDATE_PORT" "$BAD_CANDIDATE_HASH" > "$UPDATE_DIR/version.json"
+set +e
+./relais update > /tmp/relais-update-smoke.json 2>/tmp/relais-update-smoke.err
+SRC=$?
+set -e
+[ "$SRC" = 100 ] || fail update-smoke-exit
+[ "$(sha256sum ./relais | awk '{print $1}')" = "$BEFORE" ] || fail update-smoke-preserved
+ok "candidate version smoke failure preserves the binary"
+
+# Restore the valid candidate and verify atomic replacement plus rollback backup.
+cp "$UPDATE_DIR/relais-valid" "$UPDATE_DIR/relais-new"
+chmod +x "$UPDATE_DIR/relais-new"
+NEW_HASH=$(sha256sum "$UPDATE_DIR/relais-new" | awk '{print $1}')
+printf '{"ok":true,"version":"%s","download":"http://127.0.0.1:%s/artifact","sha256":"%s"}\n' "${NEW_HASH:0:12}" "$UPDATE_PORT" "$NEW_HASH" > "$UPDATE_DIR/version.json"
+# The failed paths must not have created a backup; successful update creates it.
+rm -f ./relais.bak
+./relais update > /tmp/relais-update-good.json || fail update-good
+[ -f ./relais.bak ] || fail update-backup
+[ "$(./relais version | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["content_hash"])')" = "${NEW_HASH:0:12}" ] || fail update-version
+ok "successful update swaps atomically and leaves .bak"
+# Restore the test binary so the smoke suite leaves the worktree unchanged.
+[ -f ./relais.bak ] && mv ./relais.bak ./relais
+
+rm -f /tmp/relais-update-check.json /tmp/relais-update-check.err /tmp/relais-update-bad.json /tmp/relais-update-bad.err /tmp/relais-update-smoke.json /tmp/relais-update-smoke.err /tmp/relais-update-good.json
 
 echo "ALL $P TESTS PASSED"

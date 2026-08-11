@@ -1,0 +1,105 @@
+// relais feedback — cli-feedback-spec: own endpoint + central relay dual-write.
+
+func relais_fb_post_worker(url, payload, done) {
+    status, _, err := http_request("POST", url, []string{"content-type: application/json"}, payload)
+    if err == "" && status >= 200 && status < 300 { done <- 1 } else { done <- 0 }
+}
+
+func relais_fb_timeout(done) {
+    sleep(2000)
+    done <- 0
+}
+
+func relais_fb_post(url, payload) (ok) {
+    ok = 0
+    done := make(chan int)
+    go relais_fb_post_worker(url, payload, done)
+    go relais_fb_timeout(done)
+    ok = <-done
+}
+
+func relais_fb_opt(a, flag, def) (v) {
+    v = def
+    i := 2
+    while i + 1 < len(a) {
+        if a[i] == flag { v = a[i + 1]  return }
+        i = i + 1
+    }
+}
+
+func relais_fb_message(a) (msg) {
+    parts := []string{}
+    i := 2
+    while i < len(a) {
+        if a[i] == "-kind" || a[i] == "--kind" || a[i] == "-context" || a[i] == "--context" {
+            i = i + 2
+            continue
+        }
+        parts = append(parts, a[i])
+        i = i + 1
+    }
+    msg = trim(join(parts, " "))
+}
+
+// POST /v1/feedback — open, size-capped, idempotent on client id.
+func handle_feedback(req) (res) {
+    if len(req.body) > 16384 {
+        res = response("413 Payload Too Large", "application/json", "{\"ok\":false,\"error\":\"feedback too large\"}")
+        return
+    }
+    mv, merr := json_get(req.body, ".message")
+    msg := ""
+    if merr == "" { msg = trim(unq(mv)) }
+    if msg == "" {
+        res = response("400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"message required\"}")
+        return
+    }
+    iv, _ := json_get(req.body, ".id")
+    id := unq(iv)
+    if id == "" { id = newid() }
+    kv, _ := json_get(req.body, ".kind")
+    kind := unq(kv)
+    if kind == "" { kind = "note" }
+    cv, _ := json_get(req.body, ".context")
+    rv, _ := json_get(req.body, ".reporter")
+    vv, _ := json_get(req.body, ".version")
+    db := db_open()
+    if db == 0 {
+        res = response("500 Internal Server Error", "application/json", "{\"ok\":false,\"error\":\"db unavailable\"}")
+        return
+    }
+    db_migrate(db)
+    if rate_allow(db, "fb:" + client_ip(req), 3600, 20) == false {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":false,\"error\":\"too many feedback submissions — slow down\"}")
+        return
+    }
+    sqlite_exec(db, "INSERT OR IGNORE INTO feedback(id, kind, message, context, reporter, version, created_at) VALUES(?,?,?,?,?,?,?)", []string{id, kind, msg, unq(cv), unq(rv), unq(vv), str(now())})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":true,\"id\":" + json(id) + ",\"stored\":true}")
+}
+
+func cmd_feedback(a) {
+    msg := relais_fb_message(a)
+    if msg == "" { fail(80, "usage: relais feedback <message> [-kind bug|idea|praise|note] [-context text]") }
+    kind := relais_fb_opt(a, "-kind", relais_fb_opt(a, "--kind", "note"))
+    ctx := relais_fb_opt(a, "-context", relais_fb_opt(a, "--context", "cli"))
+    reporter := env("USER")
+    if reporter == "" { reporter = "agent" }
+    id := newid()
+    payload := "{\"id\":" + json(id) + ",\"app\":\"relais\",\"version\":\"" + app_version() + "\",\"kind\":" + json(kind) + ",\"message\":" + json(msg) + ",\"context\":" + json(ctx) + ",\"reporter\":" + json(reporter) + "}"
+
+    own := env("RELAIS_FEEDBACK_URL")
+    if own == "" { own = env("RELAIS_PUBLIC_URL") }
+    stored := 0
+    if own != "" { stored = relais_fb_post(own + "/v1/feedback", payload) }
+
+    relay := env("FEEDBACK_RELAY")
+    if relay == "" { relay = "https://feedback.intrane.fr" }
+    relayed := 0
+    if relay != "off" {
+        if has_suffix(relay, "/v1/feedback") == false { relay = relay + "/v1/feedback" }
+        relayed = relais_fb_post(relay, payload)
+    }
+    out_ok("{\"id\":" + json(id) + ",\"stored\":" + str(stored) + ",\"relayed\":" + str(relayed) + "}")
+}

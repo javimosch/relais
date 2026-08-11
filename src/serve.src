@@ -8,6 +8,8 @@ func pathof(req) (p) {
 func handle(req) (res) {
     p := pathof(req)
     if p == "/_health" { res = ok_json("{\"ok\":1,\"version\":\"" + app_version() + "\"}")  return }
+    if req.method == "POST" && p == "/v1/feedback" { res = handle_feedback(req)  return }
+    if p == "/version.json" { res = relais_version_json()  return }
     // the public catch endpoint accepts ANY method
     if has_prefix(p, "/c/") { res = handle_catch(req)  return }
     if req.method == "POST" && p == "/v1/inboxes" { res = handle_inbox_create(req)  return }
