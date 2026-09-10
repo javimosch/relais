@@ -1,0 +1,117 @@
+// cli-trial-spec v0.3: bearer-as-tenant auto-provisioning + whoami + claim.
+// An agent invents a bearer token; any GET /v1/* with that bearer auto-provisions
+// an ephemeral inbox on first sight. The human later attaches an email via /app/claim.
+// The token stays the credential; the email is recovery + billing metadata.
+
+// inbox_by_token_or_provision looks up an inbox by bearer token; if not found,
+// auto-provisions a free ephemeral inbox with that token as the credential.
+// This is the bearer-as-tenant rule: the agent's invented string becomes the
+// inbox token, and sha256(token) is what's stored (never plaintext).
+func inbox_by_token_or_provision(db, req) (b, ok) {
+    tok := bearer_token(req)
+    if len(tok) < 16 { ok = 0  return }
+    b, ok = inbox_by_token(db, tok)
+    if ok == 1 { return }
+    if rate_allow(db, "tp:" + client_ip(req), 3600, 30) == false {
+        ok = 0
+        return
+    }
+    id := "in_" + substr(newid(), 0, 14)
+    exp := now() + free_ttl()
+    sqlite_exec(db, "INSERT INTO inboxes(id, token, email, label, plan, max_msgs, msg_total, expires_at, created_at) VALUES(?,?, '', 'agent trial','free',100,0,?,?)", []string{id, tok_hash(tok), str(exp), str(now())})
+    write(2, "{\"event\":\"trial_provisioned\",\"inbox\":\"" + id + "\"}\n")
+    b, ok = inbox_by_token(db, tok)
+}
+
+// GET /v1/whoami — free status check. Does NOT consume any metered unit.
+// Auto-provisions an ephemeral inbox on first sight so the agent can bootstrap
+// with this single call. Returns the catch_url so the agent knows where to
+// point its OAuth redirect / webhook / form.
+func handle_whoami(req) (res) {
+    tok := bearer_token(req)
+    if len(tok) < 16 {
+        res = response("400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"Authorization: Bearer <token> required (invent any string, 16+ chars)\"}")
+        return
+    }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":false,\"error\":\"db\"}")  return }
+    sweep_expired(db)
+    b, ok := inbox_by_token_or_provision(db, req)
+    if ok == 0 {
+        sqlite_close(db)
+        res = response("429 Too Many Requests", "application/json", "{\"ok\":false,\"error\":\"too many trial inboxes from this IP — slow down or reuse your existing token\"}")
+        return
+    }
+    base := public_url(req)
+    email_attached := "false"
+    if b.email != "" { email_attached = "true" }
+    remaining := b.max_msgs - b.msg_total
+    ttl_left := b.expires_at - now()
+    if ttl_left < 0 { ttl_left = 0 }
+    th := tok_hash(tok)
+    sqlite_close(db)
+    res = ok_json("{\"ok\":true,\"token_hash\":\"" + substr(th, 0, 16) + "\",\"email_attached\":" + email_attached +
+        ",\"inbox_id\":\"" + b.id + "\",\"plan\":\"" + b.plan + "\"" +
+        ",\"catch_url\":\"" + base + "/c/" + b.id + "\"" +
+        ",\"messages_remaining\":" + str(remaining) +
+        ",\"ttl_seconds_remaining\":" + str(ttl_left) +
+        ",\"next\":\"give catch_url to whatever should reach your agent. Block on GET /v1/wait or read GET /v1/messages with the same bearer.\"}")
+}
+
+// form_field extracts a value from an application/x-www-form-urlencoded body.
+func form_field(body, name) (v) {
+    v = ""
+    prefix := name + "="
+    parts := split(body, "&")
+    for _, p := range parts {
+        if has_prefix(p, prefix) {
+            raw := substr(p, len(prefix), len(p))
+            v = url_decode(raw)
+            return
+        }
+    }
+}
+
+// GET /app/claim — open HTML form (no auth). The human pastes the agent's
+// token + their email.
+func handle_claim_get(req) (res) {
+    res = ok_html(claim_form_html(""))
+}
+
+// POST /app/claim — attaches the email to the inbox row. Empty fields
+// re-render the form (200, not an error). Same token + new email updates
+// (re-claim, not a conflict). The token remains the credential.
+func handle_claim_post(req) (res) {
+    tok := form_field(req.body, "token")
+    email := form_field(req.body, "email")
+    if tok == "" || email == "" {
+        res = ok_html(claim_form_html("both token and email are required"))
+        return
+    }
+    if len(tok) < 16 {
+        res = ok_html(claim_form_html("token is too short — it should be the rk_... string your agent saved"))
+        return
+    }
+    db := db_open()
+    if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":false,\"error\":\"db\"}")  return }
+    b, ok := inbox_by_token(db, tok)
+    if ok == 0 {
+        sqlite_close(db)
+        res = ok_html(claim_form_html("no inbox found for that token — check it matches what your agent saved (rk_...)"))
+        return
+    }
+    sqlite_exec(db, "UPDATE inboxes SET email = ? WHERE id = ?", []string{email, b.id})
+    sqlite_close(db)
+    write(2, "{\"event\":\"inbox_claimed\",\"inbox\":\"" + b.id + "\"}\n")
+    res = ok_html(claim_success_html(email, b.id))
+}
+
+func claim_form_html(msg) (h) {
+    h = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Claim your relais inbox</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:480px;padding:2rem}h1{color:#4ade80;font-size:1.25rem;margin-bottom:0.5rem}p.sub{color:#8b93a3;font-size:0.85rem;line-height:1.5;margin-bottom:1.5rem}label{display:block;margin:1rem 0 0.25rem;color:#8b93a3;font-size:0.8rem}input{width:100%;padding:0.6rem;border:1px solid #1f1f26;border-radius:6px;background:#101014;color:#e2e8f0;font-family:inherit;box-sizing:border-box}button{margin-top:1.5rem;width:100%;padding:0.7rem;border:none;border-radius:6px;background:#4ade80;color:#0a0a0c;font-weight:600;cursor:pointer;font-family:inherit}small{color:#6b7280;line-height:1.5;display:block;margin-top:1rem}.err{color:#f87171;font-size:0.85rem;margin-top:0.5rem}</style></head><body><main><h1>Claim your relais inbox</h1><p class=\"sub\">Attach your email to an inbox your agent created. The token stays the credential — the email is for recovery and billing.</p>"
+    if msg != "" { h = h + "<p class=\"err\">" + msg + "</p>" }
+    h = h + "<form method=\"post\" action=\"/app/claim\"><label for=\"t\">Inbox token (rk_...)</label><input id=\"t\" name=\"token\" type=\"password\" required><label for=\"e\">Your email</label><input id=\"e\" name=\"email\" type=\"email\" required><button type=\"submit\">Attach email</button><small>relais can't recover the token for you — only its hash is stored. Keep the token your agent saved.</small></form></main></body></html>"
+}
+
+func claim_success_html(email, inbox_id) (h) {
+    h = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Inbox claimed — relais</title><style>body{font-family:ui-monospace,monospace;background:#0a0a0c;color:#e2e8f0;display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:480px;padding:2rem}h1{color:#4ade80;font-size:1.25rem}code{background:#101014;border:1px solid #1f1f26;border-radius:4px;padding:2px 6px;color:#86efac}p{line-height:1.6;color:#8b93a3}</style></head><body><main><h1>Email attached</h1><p>Inbox <code>" + inbox_id + "</code> is now associated with <code>" + email + "</code>.</p><p>The token your agent saved is still the credential — nothing changes for the agent. The email is for recovery and billing.</p><p><a style=\"color:#4ade80\" href=\"/\">return to relais</a></p></main></body></html>"
+}

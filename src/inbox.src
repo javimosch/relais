@@ -127,7 +127,7 @@ func handle_messages(req) (res) {
     db := db_open()
     if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
     sweep_expired(db)
-    b, ok := inbox_by_token(db, bearer_token(req))
+    b, ok := inbox_by_token_or_provision(db, req)
     if ok == 0 {
         sqlite_close(db)
         res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"unknown inbox token\"}")
@@ -145,7 +145,7 @@ func handle_messages(req) (res) {
 func handle_wait(req) (res) {
     db := db_open()
     if db == 0 { res = response("500 Internal Server Error", "application/json", "{\"ok\":0,\"error\":\"db\"}")  return }
-    b, ok := inbox_by_token(db, bearer_token(req))
+    b, ok := inbox_by_token_or_provision(db, req)
     if ok == 0 {
         sqlite_close(db)
         res = response("401 Unauthorized", "application/json", "{\"ok\":0,\"error\":\"unknown inbox token\"}")

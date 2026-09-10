@@ -97,6 +97,56 @@ echo "$PI" | grep -q '"peage_receipt"' || fail receipt; ok "persistent inbox car
 curl -sf -X DELETE "http://127.0.0.1:$PORT/v1/inbox" -H "Authorization: Bearer $TOK" | grep -q '"deleted":true' || fail delete; ok "delete inbox"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/c/$IID" -d x)" = "404" ] || fail delete-gone; ok "catch on deleted inbox -> 404"
 
+# ---- cli-trial-spec v0.3: whoami + auto-provision + claim ----
+echo "== cli-trial-spec =="
+# whoami with no bearer -> 400
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/whoami")" = "400" ] || fail whoami-no-bearer; ok "whoami without bearer -> 400"
+# whoami with short bearer -> 400
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/whoami" -H 'Authorization: Bearer short')" = "400" ] || fail whoami-short; ok "whoami with short bearer -> 400"
+
+# whoami auto-provisions on unknown bearer (the core of the trial spec)
+TRIAL_TOK="rk_trial_$(date +%s)_abcdef"
+W=$(curl -sf "http://127.0.0.1:$PORT/v1/whoami" -H "Authorization: Bearer $TRIAL_TOK")
+echo "$W" | grep -q '"ok":true' || fail whoami-ok; ok "whoami auto-provisions on unknown bearer"
+echo "$W" | J "['email_attached']" | grep -q "False" || fail whoami-email; ok "whoami shows email_attached=false"
+echo "$W" | J "['token_hash']" | grep -q "." || fail whoami-hash; ok "whoami returns token_hash"
+TRIAL_IID=$(echo "$W" | J "['inbox_id']")
+echo "$W" | grep -q "/c/$TRIAL_IID" || fail whoami-catch; ok "whoami returns catch_url"
+
+# whoami is free — calling it again returns the same inbox, no new provision
+W2=$(curl -sf "http://127.0.0.1:$PORT/v1/whoami" -H "Authorization: Bearer $TRIAL_TOK")
+[ "$(echo "$W2" | J "['inbox_id']")" = "$TRIAL_IID" ] || fail whoami-idempotent; ok "whoami is idempotent (same inbox on re-call)"
+
+# /v1/messages auto-provisions on unknown bearer
+MTOK="rk_msg_$(date +%s)_ghijkl"
+M=$(curl -sf "http://127.0.0.1:$PORT/v1/messages" -H "Authorization: Bearer $MTOK")
+echo "$M" | grep -q '"ok":1' || fail msg-auto; ok "/v1/messages auto-provisions on unknown bearer"
+echo "$M" | J "['messages']" | grep -q '\[\]' || fail msg-empty; ok "auto-provisioned inbox is empty"
+
+# /v1/wait auto-provisions on unknown bearer (times out cleanly)
+WTOK="rk_wait_$(date +%s)_mnopqr"
+[ "$(curl -sf "http://127.0.0.1:$PORT/v1/wait?timeout_ms=1000" -H "Authorization: Bearer $WTOK" | J "['timeout']")" = "True" ] || fail wait-auto; ok "/v1/wait auto-provisions and times out cleanly"
+
+# catch + read on a trial-provisioned inbox
+curl -sf -X POST "http://127.0.0.1:$PORT/c/$TRIAL_IID" -d '{"trial":"works"}' | grep -q captured || fail trial-catch; ok "catch on trial-provisioned inbox"
+M3=$(curl -sf "http://127.0.0.1:$PORT/v1/messages" -H "Authorization: Bearer $TRIAL_TOK")
+echo "$M3" | J "['messages'].__len__()" | grep -q '1' || fail trial-read; ok "read returns the caught message on trial inbox"
+
+# /app/claim GET returns the HTML form
+curl -sf "http://127.0.0.1:$PORT/app/claim" | grep -q 'name="token"' || fail claim-form; ok "GET /app/claim returns the HTML form"
+# /app/claim POST with empty fields re-renders (200, not error)
+[ "$(curl -s -o /dev/null -w '%{http_code}' -d "token=&email=" "http://127.0.0.1:$PORT/app/claim")" = "200" ] || fail claim-empty; ok "POST /app/claim empty fields re-renders (200)"
+# /app/claim POST attaches email
+CLAIM=$(curl -sf -d "token=$TRIAL_TOK&email=human@example.com" "http://127.0.0.1:$PORT/app/claim")
+echo "$CLAIM" | grep -q 'Email attached' || fail claim-attach; ok "POST /app/claim attaches email"
+# whoami after claim shows email_attached=true
+W3=$(curl -sf "http://127.0.0.1:$PORT/v1/whoami" -H "Authorization: Bearer $TRIAL_TOK")
+echo "$W3" | J "['email_attached']" | grep -q "True" || fail whoami-after-claim; ok "whoami after claim shows email_attached=true"
+# re-claim with a different email updates (not a conflict)
+curl -sf -d "token=$TRIAL_TOK&email=updated@example.com" "http://127.0.0.1:$PORT/app/claim" | grep -q 'Email attached' || fail claim-reclaim; ok "re-claim with new email updates"
+# claim with bad token re-renders with error
+curl -sf -d "token=rk_nonexistent_token_x&email=x@y.com" "http://127.0.0.1:$PORT/app/claim" | grep -q 'no inbox found' || fail claim-bad; ok "claim with bad token shows error"
+
 # operator CLI
 ./relais inbox-new -label ops | grep -q '"ok":true' || fail cli-new; ok "cli inbox-new"
 ./relais stats | grep -q '"messages"' || fail cli-stats; ok "cli stats"

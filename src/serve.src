@@ -12,6 +12,10 @@ func handle(req) (res) {
     if p == "/version.json" { res = relais_version_json()  return }
     // the public catch endpoint accepts ANY method
     if has_prefix(p, "/c/") { res = handle_catch(req)  return }
+    // cli-trial-spec: whoami (free, auto-provisions) + claim (human attaches email)
+    if req.method == "GET" && p == "/v1/whoami" { res = handle_whoami(req)  return }
+    if req.method == "GET" && p == "/app/claim" { res = handle_claim_get(req)  return }
+    if req.method == "POST" && p == "/app/claim" { res = handle_claim_post(req)  return }
     if req.method == "POST" && p == "/v1/inboxes" { res = handle_inbox_create(req)  return }
     if req.method == "GET" && p == "/v1/messages" { res = handle_messages(req)  return }
     if req.method == "DELETE" && p == "/v1/messages" { res = handle_messages_clear(req)  return }

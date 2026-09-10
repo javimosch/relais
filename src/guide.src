@@ -27,15 +27,25 @@ func llms_txt(base) (t) {
         "   3. buy the inbox:  curl -s -X POST " + base + "/v1/inboxes -H 'X-Peage-Wallet: pw_..' -d '{\"label\":\"stripe prod\"}'\n" +
         "   peage is the pay-per-call rail for agents (" + peage_url() + "/llms.txt); relais is one of its merchants.\n\n" +
         "## Endpoints\n\n" +
+        "GET    /v1/whoami        Bearer <token>         -> free status: auto-provisions an inbox on first sight, returns catch_url + remaining quota (cli-trial-spec)\n" +
         "POST   /v1/inboxes {email?, label?}              -> {inbox_id, token, catch_url}  (X-Peage-Wallet = persistent)\n" +
         "ANY    /c/<inbox_id>                             -> capture a request (this is catch_url; public)\n" +
         "GET    /v1/messages       Bearer <token>         -> up to 50 captured messages (marks them read)\n" +
         "GET    /v1/wait           Bearer <token>         -> long-poll: block until one new message (?timeout_ms=, max 55000)\n" +
         "DELETE /v1/messages       Bearer <token>         -> clear read messages\n" +
         "DELETE /v1/inbox          Bearer <token>         -> delete the inbox\n" +
+        "GET    /app/claim                                -> open HTML form: human attaches email to an agent-created inbox\n" +
+        "POST   /app/claim token=..&email=..              -> attaches email (token stays the credential)\n" +
         "GET    /_health                                  -> liveness\n" +
         "POST   /v1/feedback                              -> report a bug/idea (CLI dual-writes)\n" +
         "GET    /version.json                             -> content-hash update manifest\n\n" +
+        "## Agent trial (cli-trial-spec v0.3)\n\n" +
+        "An agent can bootstrap without a human: invent any bearer token (16+ chars),\n" +
+        "call GET /v1/whoami — an ephemeral inbox is auto-provisioned and the catch_url\n" +
+        "is returned. Use /v1/wait and /v1/messages with the same bearer. The human\n" +
+        "later visits /app/claim to attach an email for recovery. The token is always\n" +
+        "the credential; the email is metadata. Free inboxes expire in 1h (100 msgs);\n" +
+        "upgrade to persistent via peage (X-Peage-Wallet on POST /v1/inboxes).\n\n" +
         "A captured message is {id, method, path, headers, body, ip, received_at}. Secrets\n" +
         "(Authorization, Cookie) are NOT stored; the body is capped at 60 KB.\n\n" +
         "The CLI is agent-first: `relais feedback` sends to its own /v1/feedback and the central relay; `relais update` verifies sha256[:12], smoke-tests `version`, and swaps atomically with a .bak.\n"
@@ -46,12 +56,15 @@ func guide_json(base) (j) {
         "\"base_url\":" + json(base) + ",\"free_ttl_seconds\":" + str(free_ttl()) + ",\"paid_ttl_seconds\":" + str(paid_ttl()) + ",\"persistent_price_cents\":" + str(relais_price()) + ",\"pay_rail\":\"peage\"," +
         "\"flow\":[\"POST /v1/inboxes -> save token + catch_url\",\"give catch_url to whatever should reach you\",\"GET /v1/wait to block until it arrives (or /v1/messages for the backlog)\"]," +
         "\"endpoints\":[" +
+        "{\"method\":\"GET\",\"path\":\"/v1/whoami\",\"auth\":\"Bearer token\",\"note\":\"free status check — auto-provisions an ephemeral inbox on first sight (cli-trial-spec v0.3). Returns token_hash, email_attached, inbox_id, catch_url, messages_remaining, ttl_seconds_remaining\"}," +
         "{\"method\":\"POST\",\"path\":\"/v1/inboxes\",\"body\":{\"email\":\"optional\",\"label\":\"optional\"},\"headers\":{\"X-Peage-Wallet\":\"optional -> persistent inbox\"},\"returns\":\"inbox_id + token (once) + catch_url\"}," +
         "{\"method\":\"ANY\",\"path\":\"/c/<inbox_id>\",\"note\":\"public catch endpoint (this is catch_url) — captures method, path, safe headers, body\"}," +
         "{\"method\":\"GET\",\"path\":\"/v1/messages\",\"auth\":\"Bearer token\",\"note\":\"lists + marks read\"}," +
         "{\"method\":\"GET\",\"path\":\"/v1/wait\",\"auth\":\"Bearer token\",\"query\":\"timeout_ms (default 25000, max 55000)\",\"note\":\"long-poll: blocks until one new message\"}," +
         "{\"method\":\"DELETE\",\"path\":\"/v1/messages\",\"auth\":\"Bearer token\"}," +
         "{\"method\":\"DELETE\",\"path\":\"/v1/inbox\",\"auth\":\"Bearer token\"}," +
+        "{\"method\":\"GET\",\"path\":\"/app/claim\",\"note\":\"open HTML form — human attaches email to an agent-created inbox (cli-trial-spec)\"}," +
+        "{\"method\":\"POST\",\"path\":\"/app/claim\",\"body\":{\"token\":\"inbox token\",\"email\":\"human email\"},\"note\":\"attaches email; token stays the credential\"}," +
         "{\"method\":\"POST\",\"path\":\"/v1/feedback\",\"body\":{\"message\":\"required\",\"kind\":\"optional\",\"context\":\"optional\"},\"note\":\"open, rate-limited, dual-write CLI\"}," +
         "{\"method\":\"GET\",\"path\":\"/version.json\",\"returns\":\"content-hash manifest\"}" +
         "],\"commands\":{\"feedback\":\"relais feedback MESSAGE [-kind bug|idea|praise|note] [-context TEXT]\",\"update\":\"relais update [--check|--force]\"},\"env\":[\"RELAIS_FEEDBACK_URL\",\"FEEDBACK_RELAY\",\"RELAIS_VERSION_URL\",\"RELAIS_UPDATE_URL\",\"RELAIS_NO_NUDGE\"]}"
